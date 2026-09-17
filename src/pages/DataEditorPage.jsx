@@ -1,211 +1,442 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import {
   ArrowLeft,
+  ChevronDown,
   Download,
   Eye,
   EyeOff,
   FileSpreadsheet,
-  RotateCcw,
+  RefreshCcw,
   Save,
   Search,
-  RefreshCw,
-  ChevronLeft,
-  ChevronRight,
+  Undo2,
+  Redo2,
+  X,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 
-function isReadableFile(file) {
-  return (
-    file &&
-    typeof file.arrayBuffer === "function"
+/* =========================================================
+   COLUMN LETTER
+========================================================= */
+
+function columnLetter(index) {
+  let result = "";
+  let n = index + 1;
+
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    result = String.fromCharCode(65 + rem) + result;
+    n = Math.floor((n - 1) / 26);
+  }
+
+  return result;
+}
+
+/* =========================================================
+   NORMALIZE ONE WORKBOOK OBJECT
+========================================================= */
+
+function normalizeSingleWorkbook(raw, fileIndex = 0) {
+  if (!raw) return [];
+
+  /*
+     CASE 1:
+     Parsed workbook object:
+
+     {
+       fileName,
+       workbookSheets: [
+         {
+           name,
+           headers,
+           rows
+         }
+       ],
+       sheets: {
+         Sheet1: [...]
+       }
+     }
+  */
+
+  if (Array.isArray(raw.workbookSheets)) {
+    return raw.workbookSheets.map((sheet) => ({
+      name: sheet.name,
+      headers:
+        sheet.headers ||
+        (sheet.rows?.length
+          ? Object.keys(sheet.rows[0])
+          : []),
+      rows: sheet.rows || [],
+      fileIndex,
+    }));
+  }
+
+  /*
+     CASE 2:
+     Parsed workbook using sheets object
+  */
+
+  if (
+    raw.sheets &&
+    typeof raw.sheets === "object"
+  ) {
+    return Object.entries(raw.sheets).map(
+      ([name, rows]) => ({
+        name,
+        headers:
+          rows?.length
+            ? Object.keys(rows[0])
+            : [],
+        rows: rows || [],
+        fileIndex,
+      })
+    );
+  }
+
+  return [];
+}
+
+/* =========================================================
+   NORMALIZE RAW INPUT
+
+   Supports:
+
+   1. Array of parsed workbook objects
+   2. Single parsed workbook object
+   3. Array of actual File objects
+
+========================================================= */
+
+async function normalizeRaw(raw) {
+  /*
+     IMPORTANT:
+
+     Your current UploadPage passes parsed workbook
+     objects, NOT browser File objects.
+
+     Therefore this function first handles those objects.
+  */
+
+  if (Array.isArray(raw)) {
+    const allSheets = [];
+
+    for (
+      let fileIndex = 0;
+      fileIndex < raw.length;
+      fileIndex++
+    ) {
+      const item = raw[fileIndex];
+
+      /*
+         Already parsed workbook
+      */
+      if (
+        item?.workbookSheets ||
+        item?.sheets
+      ) {
+        const sheets =
+          normalizeSingleWorkbook(
+            item,
+            fileIndex
+          );
+
+        allSheets.push(...sheets);
+        continue;
+      }
+
+      /*
+         Actual browser File object
+      */
+      if (
+        item &&
+        typeof item.arrayBuffer === "function"
+      ) {
+        const buffer =
+          await item.arrayBuffer();
+
+        const workbook = XLSX.read(
+          buffer,
+          {
+            type: "array",
+            cellFormula: true,
+            cellNF: true,
+            cellStyles: true,
+            cellDates: true,
+          }
+        );
+
+        workbook.SheetNames.forEach(
+          (sheetName) => {
+            const ws =
+              workbook.Sheets[sheetName];
+
+            const range =
+              XLSX.utils.decode_range(
+                ws["!ref"] || "A1"
+              );
+
+            const headers = [];
+
+            for (
+              let c = range.s.c;
+              c <= range.e.c;
+              c++
+            ) {
+              const address =
+                XLSX.utils.encode_cell({
+                  r: range.s.r,
+                  c,
+                });
+
+              const cell =
+                ws[address];
+
+              headers.push(
+                cell?.v ??
+                  `Column ${c + 1}`
+              );
+            }
+
+            const rows = [];
+
+            for (
+              let r =
+                range.s.r + 1;
+              r <= range.e.r;
+              r++
+            ) {
+              const row = {};
+
+              for (
+                let c = range.s.c;
+                c <= range.e.c;
+                c++
+              ) {
+                const address =
+                  XLSX.utils.encode_cell({
+                    r,
+                    c,
+                  });
+
+                const cell =
+                  ws[address];
+
+                const header =
+                  headers[
+                    c - range.s.c
+                  ];
+
+                if (cell?.f) {
+                  row[header] =
+                    `=${cell.f}`;
+                } else {
+                  row[header] =
+                    cell?.v ?? "";
+                }
+              }
+
+              rows.push(row);
+            }
+
+            allSheets.push({
+              name: sheetName,
+              headers,
+              rows,
+              fileIndex,
+            });
+          }
+        );
+      }
+    }
+
+    return allSheets;
+  }
+
+  /*
+     Single parsed workbook
+  */
+
+  if (
+    raw?.workbookSheets ||
+    raw?.sheets
+  ) {
+    return normalizeSingleWorkbook(
+      raw,
+      0
+    );
+  }
+
+  return [];
+}
+
+/* =========================================================
+   BUILD EDITED PARSED WORKBOOKS
+
+   This is the critical part.
+
+   We return the SAME structure that your existing
+   Dashboard / calculations already expect.
+
+========================================================= */
+
+function buildEditedRaw(
+  originalRaw,
+  editorData
+) {
+  /*
+     If the application stores multiple uploaded
+     workbook objects, preserve that structure.
+  */
+
+  if (Array.isArray(originalRaw)) {
+    return originalRaw.map(
+      (originalWorkbook, fileIndex) => {
+        const fileSheets =
+          editorData.filter(
+            (sheet) =>
+              sheet.fileIndex ===
+              fileIndex
+          );
+
+        const workbookSheets =
+          fileSheets.map((sheet) => ({
+            name: sheet.name,
+            headers: sheet.headers,
+            rows: sheet.rows,
+          }));
+
+        return {
+          ...originalWorkbook,
+          workbookSheets,
+          sheets:
+            Object.fromEntries(
+              workbookSheets.map(
+                (sheet) => [
+                  sheet.name,
+                  sheet.rows,
+                ]
+              )
+            ),
+        };
+      }
+    );
+  }
+
+  /*
+     Single workbook object
+  */
+
+  const workbookSheets =
+    editorData.map((sheet) => ({
+      name: sheet.name,
+      headers: sheet.headers,
+      rows: sheet.rows,
+    }));
+
+  return {
+    ...originalRaw,
+    workbookSheets,
+    sheets:
+      Object.fromEntries(
+        workbookSheets.map(
+          (sheet) => [
+            sheet.name,
+            sheet.rows,
+          ]
+        )
+      ),
+  };
+}
+
+/* =========================================================
+   EXPORT EDITOR DATA TO XLSX
+========================================================= */
+
+function downloadEditorData(
+  data,
+  fileName
+) {
+  /*
+     Group sheets by original file.
+  */
+
+  const grouped = {};
+
+  data.forEach((sheet) => {
+    const index =
+      sheet.fileIndex ?? 0;
+
+    if (!grouped[index]) {
+      grouped[index] = [];
+    }
+
+    grouped[index].push(sheet);
+  });
+
+  Object.entries(grouped).forEach(
+    ([fileIndex, sheets]) => {
+      const workbook =
+        XLSX.utils.book_new();
+
+      sheets.forEach((sheet) => {
+        const rows =
+          sheet.rows.map((row) => {
+            const ordered = {};
+
+            sheet.headers.forEach(
+              (header) => {
+                ordered[header] =
+                  row[header] ?? "";
+              }
+            );
+
+            return ordered;
+          });
+
+        const worksheet =
+          XLSX.utils.json_to_sheet(
+            rows,
+            {
+              header:
+                sheet.headers,
+            }
+          );
+
+        XLSX.utils.book_append_sheet(
+          workbook,
+          worksheet,
+          String(
+            sheet.name
+          ).slice(0, 31)
+        );
+      });
+
+      const baseName =
+        Array.isArray(fileName)
+          ? fileName[
+              Number(fileIndex)
+            ]
+          : fileName;
+
+      XLSX.writeFile(
+        workbook,
+        baseName
+          ? String(baseName)
+              .replace(
+                /\.xlsx$/i,
+                ""
+              ) + ".xlsx"
+          : `SLA_Edited_Workbook_${
+              Number(fileIndex) + 1
+            }.xlsx`
+      );
+    }
   );
 }
 
-/* -------------------------------------------------------
-   READ ONE EXCEL FILE
-------------------------------------------------------- */
-
-async function readExcelFile(file, fileIndex = 0) {
-  if (!isReadableFile(file)) {
-    throw new Error(
-      `Uploaded item ${fileIndex + 1} is not a readable Excel file object.`
-    );
-  }
-
-  const buffer = await file.arrayBuffer();
-
-  if (!buffer || buffer.byteLength === 0) {
-    throw new Error(
-      `${file.name || `File ${fileIndex + 1}`} is empty.`
-    );
-  }
-
-  let workbook;
-
-  try {
-    workbook = XLSX.read(buffer, {
-      type: "array",
-      cellFormula: true,
-      cellNF: true,
-      cellStyles: true,
-      cellDates: true,
-    });
-  } catch (error) {
-    throw new Error(
-      `Could not read ${file.name || `File ${fileIndex + 1}`}: ${
-        error?.message || "Invalid Excel workbook."
-      }`
-    );
-  }
-
-  if (!workbook?.SheetNames?.length) {
-    throw new Error(
-      `${file.name || `File ${fileIndex + 1}`} does not contain any worksheets.`
-    );
-  }
-
-  const sheets = [];
-
-  workbook.SheetNames.forEach((sheetName) => {
-    const ws = workbook.Sheets[sheetName];
-
-    if (!ws) return;
-
-    const range = XLSX.utils.decode_range(ws["!ref"] || "A1");
-
-    const headers = [];
-
-    for (let c = range.s.c; c <= range.e.c; c++) {
-      const address = XLSX.utils.encode_cell({
-        r: range.s.r,
-        c,
-      });
-
-      const value = ws[address]?.v;
-
-      headers.push(
-        value !== undefined &&
-          value !== null &&
-          String(value).trim() !== ""
-          ? String(value)
-          : `Column ${c + 1}`
-      );
-    }
-
-    const rows = [];
-
-    for (
-      let r = range.s.r + 1;
-      r <= range.e.r;
-      r++
-    ) {
-      const row = {};
-
-      for (
-        let c = range.s.c;
-        c <= range.e.c;
-        c++
-      ) {
-        const address = XLSX.utils.encode_cell({
-          r,
-          c,
-        });
-
-        const cell = ws[address];
-        const header = headers[c - range.s.c];
-
-        if (cell?.f) {
-          row[header] = `=${cell.f}`;
-        } else if (cell?.v !== undefined && cell?.v !== null) {
-          row[header] = cell.v;
-        } else {
-          row[header] = "";
-        }
-      }
-
-      rows.push(row);
-    }
-
-    sheets.push({
-      name: sheetName,
-      headers,
-      rows,
-      fileIndex,
-      fileName: file.name || `Workbook ${fileIndex + 1}`,
-    });
-  });
-
-  return sheets;
-}
-
-/* -------------------------------------------------------
-   CONVERT EDITED DATA BACK TO ORIGINAL FILE STRUCTURE
-------------------------------------------------------- */
-
-function buildEditedFiles(originalFiles, editorSheets) {
-  const grouped = {};
-
-  editorSheets.forEach((sheet) => {
-    if (!grouped[sheet.fileIndex]) {
-      grouped[sheet.fileIndex] = [];
-    }
-
-    grouped[sheet.fileIndex].push(sheet);
-  });
-
-  return originalFiles.map((originalFile, fileIndex) => {
-    const sheets = grouped[fileIndex] || [];
-
-    const workbook = XLSX.utils.book_new();
-
-    sheets.forEach((sheet) => {
-      const rows = sheet.rows.map((row) => {
-        const orderedRow = {};
-
-        sheet.headers.forEach((header) => {
-          orderedRow[header] =
-            row[header] === undefined ||
-            row[header] === null
-              ? ""
-              : row[header];
-        });
-
-        return orderedRow;
-      });
-
-      const worksheet = XLSX.utils.json_to_sheet(
-        rows,
-        {
-          header: sheet.headers,
-        }
-      );
-
-      XLSX.utils.book_append_sheet(
-        workbook,
-        worksheet,
-        String(sheet.name).slice(0, 31)
-      );
-    });
-
-    const output = XLSX.write(workbook, {
-      bookType: "xlsx",
-      type: "array",
-    });
-
-    return new File(
-      [output],
-      originalFile.name || `Edited_${fileIndex + 1}.xlsx`,
-      {
-        type:
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      }
-    );
-  });
-}
-
-/* -------------------------------------------------------
+/* =========================================================
    MAIN COMPONENT
-------------------------------------------------------- */
+========================================================= */
 
 export default function DataEditorPage({
   raw,
@@ -213,427 +444,357 @@ export default function DataEditorPage({
   onSave,
   onRecalculate,
 }) {
-  const [data, setData] = useState([]);
-  const [activeSheet, setActiveSheet] = useState(0);
+  const initialSheets = useMemo(() => {
+    /*
+       Only synchronous normalization here.
 
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+       Parsed workbook objects are what your current
+       application uses.
+    */
 
-  const [search, setSearch] = useState("");
-  const [hiddenColumns, setHiddenColumns] = useState([]);
-
-  const [history, setHistory] = useState([]);
-  const [historyIndex, setHistoryIndex] = useState(-1);
-
-  const [saving, setSaving] = useState(false);
-
-  /* -------------------------------------------------------
-     NORMALIZE INPUT
-  ------------------------------------------------------- */
-
-  const inputFiles = useMemo(() => {
     if (Array.isArray(raw)) {
-      return raw;
+      return raw.flatMap(
+        (item, fileIndex) =>
+          normalizeSingleWorkbook(
+            item,
+            fileIndex
+          )
+      );
     }
 
-    if (raw?.files && Array.isArray(raw.files)) {
-      return raw.files;
-    }
-
-    if (raw?.file) {
-      return [raw.file];
-    }
-
-    return [];
+    return normalizeSingleWorkbook(
+      raw,
+      0
+    );
   }, [raw]);
 
-  /* -------------------------------------------------------
-     LOAD WORKBOOKS
-  ------------------------------------------------------- */
+  const [data, setData] =
+    useState(initialSheets);
 
-  useEffect(() => {
-    let cancelled = false;
+  const [activeSheet, setActiveSheet] =
+    useState(0);
 
-    async function loadFiles() {
-      setLoading(true);
-      setError("");
-      setData([]);
-      setActiveSheet(0);
-
-      try {
-        if (!inputFiles.length) {
-          throw new Error(
-            "No uploaded files were passed to the data editor."
-          );
-        }
-
-        const allSheets = [];
-
-        for (
-          let fileIndex = 0;
-          fileIndex < inputFiles.length;
-          fileIndex++
-        ) {
-          const file = inputFiles[fileIndex];
-
-          const sheets = await readExcelFile(
-            file,
-            fileIndex
-          );
-
-          allSheets.push(...sheets);
-        }
-
-        if (!allSheets.length) {
-          throw new Error(
-            "The uploaded workbooks contain no readable worksheets."
-          );
-        }
-
-        if (!cancelled) {
-          setData(allSheets);
-
-          setHistory([
-            JSON.parse(JSON.stringify(allSheets)),
-          ]);
-
-          setHistoryIndex(0);
-        }
-      } catch (err) {
-        console.error(
-          "DATA EDITOR WORKBOOK LOAD ERROR:",
-          err
-        );
-
-        if (!cancelled) {
-          setError(
-            err?.message ||
-              "The uploaded files could not be read as Excel workbooks."
-          );
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      }
-    }
-
-    loadFiles();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [inputFiles]);
-
-  /* -------------------------------------------------------
-     ACTIVE SHEET
-  ------------------------------------------------------- */
-
-  const sheet = data[activeSheet];
-
-  /* -------------------------------------------------------
-     FILTER ROWS
-  ------------------------------------------------------- */
-
-  const filteredRows = useMemo(() => {
-    if (!sheet) return [];
-
-    if (!search.trim()) {
-      return sheet.rows;
-    }
-
-    const term = search.toLowerCase();
-
-    return sheet.rows.filter((row) =>
-      sheet.headers.some((header) =>
-        String(row[header] ?? "")
-          .toLowerCase()
-          .includes(term)
-      )
-    );
-  }, [sheet, search]);
-
-  /* -------------------------------------------------------
-     UPDATE CELL
-  ------------------------------------------------------- */
-
-  const updateCell = (
-    rowIndex,
-    column,
-    value
-  ) => {
-    if (!sheet) return;
-
-    const actualRowIndex = sheet.rows.indexOf(
-      filteredRows[rowIndex]
-    );
-
-    if (actualRowIndex === -1) return;
-
-    const newData = data.map((currentSheet, index) => {
-      if (index !== activeSheet) {
-        return currentSheet;
-      }
-
-      return {
-        ...currentSheet,
-        rows: currentSheet.rows.map(
-          (row, index2) => {
-            if (index2 !== actualRowIndex) {
-              return row;
-            }
-
-            return {
-              ...row,
-              [column]: value,
-            };
-          }
-        ),
-      };
+  const [selected, setSelected] =
+    useState({
+      row: 0,
+      col: 0,
     });
 
-    setData(newData);
+  const [editing, setEditing] =
+    useState(false);
 
-    const snapshot = JSON.parse(
-      JSON.stringify(newData)
-    );
+  const [editValue, setEditValue] =
+    useState("");
 
-    const newHistory = history.slice(
-      0,
-      historyIndex + 1
-    );
+  const [search, setSearch] =
+    useState("");
 
-    newHistory.push(snapshot);
+  const [hiddenColumns, setHiddenColumns] =
+    useState({});
 
-    setHistory(newHistory);
-    setHistoryIndex(newHistory.length - 1);
-  };
+  const [history, setHistory] =
+    useState([]);
 
-  /* -------------------------------------------------------
-     UNDO
-  ------------------------------------------------------- */
+  const [future, setFuture] =
+    useState([]);
 
-  const undo = () => {
-    if (historyIndex <= 0) return;
+  const sheet =
+    data[activeSheet];
 
-    const previousIndex =
-      historyIndex - 1;
+  /* =======================================================
+     VISIBLE HEADERS
+  ======================================================= */
 
-    const previousData =
-      JSON.parse(
-        JSON.stringify(
-          history[previousIndex]
+  const visibleHeaders =
+    useMemo(() => {
+      if (!sheet) return [];
+
+      return sheet.headers
+        .map(
+          (header, index) => ({
+            header,
+            index,
+          })
         )
-      );
+        .filter(
+          ({ index }) =>
+            !hiddenColumns[
+              `${activeSheet}-${index}`
+            ]
+        );
+    }, [
+      sheet,
+      hiddenColumns,
+      activeSheet,
+    ]);
 
-    setData(previousData);
-    setHistoryIndex(previousIndex);
-  };
+  /* =======================================================
+     SELECTED CELL
+  ======================================================= */
 
-  /* -------------------------------------------------------
-     REDO
-  ------------------------------------------------------- */
+  const selectedHeader =
+    sheet?.headers?.[
+      selected.col
+    ] || "";
 
-  const redo = () => {
-    if (
-      historyIndex >=
-      history.length - 1
-    ) {
-      return;
-    }
+  const selectedValue =
+    sheet?.rows?.[
+      selected.row
+    ]?.[selectedHeader] ?? "";
 
-    const nextIndex =
-      historyIndex + 1;
+  /* =======================================================
+     HISTORY
+  ======================================================= */
 
-    const nextData =
-      JSON.parse(
-        JSON.stringify(
-          history[nextIndex]
-        )
-      );
+  function pushHistory(nextData) {
+    setHistory((prev) => [
+      ...prev.slice(-30),
+      data,
+    ]);
+
+    setFuture([]);
 
     setData(nextData);
-    setHistoryIndex(nextIndex);
-  };
+  }
 
-  /* -------------------------------------------------------
-     HIDE / SHOW COLUMN
-  ------------------------------------------------------- */
+  /* =======================================================
+     UPDATE CELL
+  ======================================================= */
 
-  const toggleColumn = (column) => {
-    setHiddenColumns((current) => {
-      if (current.includes(column)) {
-        return current.filter(
-          (item) => item !== column
-        );
-      }
+  function updateCell(
+    rowIndex,
+    colIndex,
+    value
+  ) {
+    if (!sheet) return;
 
-      return [...current, column];
+    const header =
+      sheet.headers[colIndex];
+
+    const next =
+      data.map(
+        (currentSheet, sheetIndex) => {
+          if (
+            sheetIndex !==
+            activeSheet
+          ) {
+            return currentSheet;
+          }
+
+          return {
+            ...currentSheet,
+
+            rows:
+              currentSheet.rows.map(
+                (row, rowIndex2) =>
+                  rowIndex2 ===
+                  rowIndex
+                    ? {
+                        ...row,
+                        [header]:
+                          value,
+                      }
+                    : row
+              ),
+          };
+        }
+      );
+
+    pushHistory(next);
+  }
+
+  /* =======================================================
+     COMMIT EDIT
+  ======================================================= */
+
+  function commitEdit() {
+    updateCell(
+      selected.row,
+      selected.col,
+      editValue
+    );
+
+    setEditing(false);
+  }
+
+  /* =======================================================
+     SELECT CELL
+  ======================================================= */
+
+  function selectCell(
+    row,
+    col
+  ) {
+    setSelected({
+      row,
+      col,
     });
-  };
 
-  /* -------------------------------------------------------
-     SAVE
-  ------------------------------------------------------- */
+    setEditing(false);
+  }
 
-  const saveChanges = async () => {
-    if (!inputFiles.length || !data.length) {
-      return;
-    }
+  /* =======================================================
+     UNDO
+  ======================================================= */
 
-    setSaving(true);
+  function undo() {
+    if (!history.length) return;
 
-    try {
-      const editedFiles =
-        buildEditedFiles(
-          inputFiles,
-          data
-        );
+    const previous =
+      history[
+        history.length - 1
+      ];
 
-      if (onSave) {
-        await onSave(editedFiles);
-      }
-    } catch (err) {
-      console.error(
-        "SAVE ERROR:",
-        err
-      );
+    setFuture((prev) => [
+      ...prev,
+      data,
+    ]);
 
-      setError(
-        err?.message ||
-          "Unable to save the edited workbook."
-      );
-    } finally {
-      setSaving(false);
-    }
-  };
+    setData(previous);
 
-  /* -------------------------------------------------------
-     SAVE + RECALCULATE
-  ------------------------------------------------------- */
+    setHistory((prev) =>
+      prev.slice(0, -1)
+    );
+  }
 
-  const recalculate = async () => {
-    if (!inputFiles.length || !data.length) {
-      return;
-    }
+  /* =======================================================
+     REDO
+  ======================================================= */
 
-    setSaving(true);
-    setError("");
+  function redo() {
+    if (!future.length) return;
 
-    try {
-      const editedFiles =
-        buildEditedFiles(
-          inputFiles,
-          data
-        );
+    const next =
+      future[
+        future.length - 1
+      ];
 
-      if (onRecalculate) {
-        await onRecalculate(
-          editedFiles
-        );
-      } else if (onSave) {
-        await onSave(editedFiles);
-      }
-    } catch (err) {
-      console.error(
-        "RECALCULATE ERROR:",
-        err
-      );
+    setHistory((prev) => [
+      ...prev,
+      data,
+    ]);
 
-      setError(
-        err?.message ||
-          "Unable to recalculate the dashboard."
-      );
-    } finally {
-      setSaving(false);
-    }
-  };
+    setData(next);
 
-  /* -------------------------------------------------------
+    setFuture((prev) =>
+      prev.slice(0, -1)
+    );
+  }
+
+  /* =======================================================
+     TOGGLE COLUMN
+  ======================================================= */
+
+  function toggleColumn(
+    colIndex
+  ) {
+    const key =
+      `${activeSheet}-${colIndex}`;
+
+    setHiddenColumns(
+      (prev) => ({
+        ...prev,
+        [key]:
+          !prev[key],
+      })
+    );
+  }
+
+  /* =======================================================
      EXPORT
-  ------------------------------------------------------- */
+  ======================================================= */
 
-  const exportWorkbook = () => {
-    if (!data.length) return;
+  function exportWorkbook() {
+    const fileNames =
+      Array.isArray(raw)
+        ? raw.map(
+            (item, index) =>
+              item?.fileName ||
+              `SLA_Edited_Workbook_${
+                index + 1
+              }`
+          )
+        : raw?.fileName ||
+          "SLA_Edited_Workbook";
 
-    const files =
-      buildEditedFiles(
-        inputFiles,
+    downloadEditorData(
+      data,
+      fileNames
+    );
+  }
+
+  /* =======================================================
+     SAVE CHANGES
+  ======================================================= */
+
+  function saveChanges() {
+    const editedRaw =
+      buildEditedRaw(
+        raw,
         data
       );
 
-    files.forEach((file) => {
-      const url =
-        URL.createObjectURL(file);
+    if (onSave) {
+      onSave(
+        editedRaw
+      );
+    }
 
-      const link =
-        document.createElement("a");
+    alert(
+      "Changes saved."
+    );
+  }
 
-      link.href = url;
-      link.download =
-        file.name ||
-        "Edited_Workbook.xlsx";
+  /* =======================================================
+     RECALCULATE DASHBOARD
+  ======================================================= */
 
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+  function recalculate() {
+    const editedRaw =
+      buildEditedRaw(
+        raw,
+        data
+      );
 
-      URL.revokeObjectURL(url);
-    });
-  };
+    if (onRecalculate) {
+      onRecalculate(
+        editedRaw
+      );
+    } else if (onSave) {
+      onSave(
+        editedRaw
+      );
+    }
 
-  /* -------------------------------------------------------
-     LOADING
-  ------------------------------------------------------- */
+    alert(
+      "Dashboard recalculated from the edited data."
+    );
+  }
 
-  if (loading) {
+  /* =======================================================
+     EMPTY STATE
+  ======================================================= */
+
+  if (!sheet) {
     return (
       <div className="data-editor-page">
-        <div className="editor-loading">
-          <RefreshCw
-            size={42}
-            className="spin"
+        <div className="data-editor-empty">
+          <FileSpreadsheet
+            size={44}
           />
 
           <h2>
-            Loading workbook...
+            No workbook data available
           </h2>
 
           <p>
-            Reading the uploaded Excel
-            files.
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  /* -------------------------------------------------------
-     ERROR
-  ------------------------------------------------------- */
-
-  if (error) {
-    return (
-      <div className="data-editor-page">
-        <div className="editor-error">
-          <FileSpreadsheet
-            size={56}
-          />
-
-          <h1>
-            Unable to load workbook
-          </h1>
-
-          <p>
-            {error}
+            The uploaded workbook data
+            was not passed to the editor.
           </p>
 
           <button
-            type="button"
-            className="editor-primary-btn"
             onClick={onBack}
           >
-            <ArrowLeft size={16} />
             Back to Dashboard
           </button>
         </div>
@@ -641,77 +802,54 @@ export default function DataEditorPage({
     );
   }
 
-  /* -------------------------------------------------------
-     EMPTY
-  ------------------------------------------------------- */
-
-  if (!data.length || !sheet) {
-    return (
-      <div className="data-editor-page">
-        <div className="editor-error">
-          <FileSpreadsheet
-            size={56}
-          />
-
-          <h1>
-            No workbook data available
-          </h1>
-
-          <p>
-            No readable worksheets were
-            found in the uploaded files.
-          </p>
-
-          <button
-            type="button"
-            className="editor-primary-btn"
-            onClick={onBack}
-          >
-            <ArrowLeft size={16} />
-            Back to Dashboard
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  /* -------------------------------------------------------
+  /* =======================================================
      MAIN EDITOR
-  ------------------------------------------------------- */
+  ======================================================= */
 
   return (
     <div className="data-editor-page">
 
-      {/* HEADER */}
+      {/* =====================================================
+          TOP BAR
+      ===================================================== */}
 
-      <div className="data-editor-header">
+      <header className="data-editor-topbar">
 
-        <div className="editor-title-area">
+        <div className="editor-brand">
 
           <button
-            type="button"
-            className="editor-back-btn"
+            className="editor-back"
             onClick={onBack}
+            title="Back to Dashboard"
           >
-            <ArrowLeft size={17} />
-            Dashboard
+            <ArrowLeft
+              size={18}
+            />
           </button>
 
-          <div className="editor-title">
+          <div className="editor-file-icon">
             <FileSpreadsheet
-              size={25}
+              size={19}
             />
+          </div>
 
-            <div>
-              <h1>
-                Data Editor
-              </h1>
+          <div>
+            <div className="editor-title">
+              Workbook Data Editor
+            </div>
 
-              <p>
-                Edit uploaded workbook
-                data before recalculating
-                the dashboard.
-              </p>
+            <div className="editor-subtitle">
+              {Array.isArray(raw)
+                ? raw
+                    .map(
+                      (item) =>
+                        item?.fileName
+                    )
+                    .filter(Boolean)
+                    .join(" · ") ||
+                  "Uploaded Workbooks"
+                : raw?.fileName ||
+                  "Uploaded Workbook"}
             </div>
           </div>
 
@@ -720,186 +858,270 @@ export default function DataEditorPage({
         <div className="editor-actions">
 
           <button
-            type="button"
-            className="editor-secondary-btn"
+            className="editor-tool-btn"
             onClick={undo}
             disabled={
-              historyIndex <= 0
+              !history.length
             }
+            title="Undo"
           >
-            <RotateCcw size={15} />
-            Undo
+            <Undo2
+              size={16}
+            />
           </button>
 
           <button
-            type="button"
-            className="editor-secondary-btn"
+            className="editor-tool-btn"
             onClick={redo}
             disabled={
-              historyIndex >=
-              history.length - 1
+              !future.length
+            }
+            title="Redo"
+          >
+            <Redo2
+              size={16}
+            />
+          </button>
+
+          <div className="editor-divider" />
+
+          <button
+            className="editor-secondary-btn"
+            onClick={
+              recalculate
             }
           >
-            <RefreshCw size={15} />
-            Redo
+            <RefreshCcw
+              size={15}
+            />
+
+            Recalculate Dashboard
           </button>
 
           <button
-            type="button"
             className="editor-secondary-btn"
-            onClick={exportWorkbook}
+            onClick={
+              exportWorkbook
+            }
           >
-            <Download size={15} />
+            <Download
+              size={15}
+            />
+
             Export
           </button>
 
           <button
-            type="button"
-            className="editor-secondary-btn"
-            onClick={saveChanges}
-            disabled={saving}
-          >
-            <Save size={15} />
-            {saving
-              ? "Saving..."
-              : "Save Changes"}
-          </button>
-
-          <button
-            type="button"
             className="editor-primary-btn"
-            onClick={recalculate}
-            disabled={saving}
+            onClick={
+              saveChanges
+            }
           >
-            <RefreshCw size={15} />
-            {saving
-              ? "Recalculating..."
-              : "Save & Recalculate"}
+            <Save
+              size={15}
+            />
+
+            Save Changes
           </button>
 
         </div>
+      </header>
+
+      {/* =====================================================
+          SHEET TABS
+      ===================================================== */}
+
+      <div className="editor-sheet-tabs">
+
+        {data.map(
+          (currentSheet, index) => (
+            <button
+              key={`${currentSheet.fileIndex}-${currentSheet.name}-${index}`}
+              className={
+                index ===
+                activeSheet
+                  ? "editor-sheet-tab active"
+                  : "editor-sheet-tab"
+              }
+              onClick={() => {
+                setActiveSheet(
+                  index
+                );
+
+                setSelected({
+                  row: 0,
+                  col: 0,
+                });
+
+                setEditing(
+                  false
+                );
+
+                setSearch("");
+              }}
+            >
+              {currentSheet.name}
+            </button>
+          )
+        )}
+
       </div>
 
-      {/* TOOLBAR */}
+      {/* =====================================================
+          TOOLBAR
+      ===================================================== */}
 
-      <div className="data-editor-toolbar">
-
-        <div className="sheet-tabs">
-
-          {data.map(
-            (currentSheet, index) => (
-              <button
-                key={`${currentSheet.fileIndex}-${currentSheet.name}-${index}`}
-                type="button"
-                className={
-                  index === activeSheet
-                    ? "sheet-tab active"
-                    : "sheet-tab"
-                }
-                onClick={() => {
-                  setActiveSheet(index);
-                  setSearch("");
-                  setHiddenColumns([]);
-                }}
-              >
-                <FileSpreadsheet
-                  size={14}
-                />
-
-                {currentSheet.name}
-
-                <span>
-                  {currentSheet.rows.length}
-                </span>
-              </button>
-            )
-          )}
-
-        </div>
+      <div className="editor-toolbar">
 
         <div className="editor-search">
 
-          <Search size={16} />
+          <Search
+            size={15}
+          />
 
           <input
-            type="text"
-            placeholder="Search this sheet..."
             value={search}
             onChange={(e) =>
               setSearch(
                 e.target.value
               )
             }
+            placeholder="Search this sheet..."
           />
 
           {search && (
-            <span>
-              {filteredRows.length} rows
-            </span>
+            <button
+              onClick={() =>
+                setSearch("")
+              }
+            >
+              <X
+                size={13}
+              />
+            </button>
           )}
 
         </div>
 
+        <div className="editor-toolbar-spacer" />
+
+        <div className="editor-sheet-info">
+
+          <span>
+            {sheet.rows.length.toLocaleString()} rows
+          </span>
+
+          <span>
+            •
+          </span>
+
+          <span>
+            {sheet.headers.length} columns
+          </span>
+
+        </div>
+
+        <ColumnMenu
+          headers={
+            sheet.headers
+          }
+          hiddenColumns={
+            hiddenColumns
+          }
+          activeSheet={
+            activeSheet
+          }
+          onToggle={
+            toggleColumn
+          }
+        />
+
       </div>
 
-      {/* COLUMN CONTROLS */}
+      {/* =====================================================
+          FORMULA BAR
+      ===================================================== */}
 
-      <div className="column-controls">
+      <div className="editor-formula-bar">
 
-        <span className="column-control-label">
-          Columns:
-        </span>
+        <div className="editor-name-box">
+          {columnLetter(
+            selected.col
+          )}
+          {selected.row + 2}
+        </div>
 
-        {sheet.headers.map(
-          (header) => {
-            const hidden =
-              hiddenColumns.includes(
-                header
+        <div className="formula-symbol">
+          fx
+        </div>
+
+        <input
+          className="formula-input"
+          value={
+            editing
+              ? editValue
+              : String(
+                  selectedValue ??
+                    ""
+                )
+          }
+          onChange={(e) => {
+            if (!editing) {
+              setEditing(
+                true
+              );
+            }
+
+            setEditValue(
+              e.target.value
+            );
+          }}
+          onKeyDown={(e) => {
+            if (
+              e.key ===
+              "Enter"
+            ) {
+              commitEdit();
+            }
+
+            if (
+              e.key ===
+              "Escape"
+            ) {
+              setEditing(
+                false
+              );
+            }
+          }}
+          onFocus={() => {
+            if (!editing) {
+              setEditValue(
+                String(
+                  selectedValue ??
+                    ""
+                )
               );
 
-            return (
-              <button
-                key={header}
-                type="button"
-                className={
-                  hidden
-                    ? "column-toggle hidden"
-                    : "column-toggle"
-                }
-                onClick={() =>
-                  toggleColumn(
-                    header
-                  )
-                }
-                title={
-                  hidden
-                    ? `Show ${header}`
-                    : `Hide ${header}`
-                }
-              >
-                {hidden ? (
-                  <EyeOff
-                    size={13}
-                  />
-                ) : (
-                  <Eye
-                    size={13}
-                  />
-                )}
+              setEditing(
+                true
+              );
+            }
+          }}
+        />
 
-                {header}
-              </button>
-            );
-          }
-        )}
+        <div className="formula-column-name">
+          {selectedHeader}
+        </div>
 
       </div>
 
-      {/* TABLE */}
+      {/* =====================================================
+          GRID
+      ===================================================== */}
 
-      <div className="data-editor-table-wrapper">
+      <div className="editor-grid-wrapper">
 
-        <table className="data-editor-table">
+        <table className="editor-grid">
 
           <thead>
             <tr>
@@ -908,81 +1130,196 @@ export default function DataEditorPage({
                 #
               </th>
 
-              {sheet.headers
-                .filter(
-                  (header) =>
-                    !hiddenColumns.includes(
-                      header
-                    )
+              {visibleHeaders.map(
+                ({
+                  header,
+                  index,
+                }) => (
+                  <th
+                    key={`${header}-${index}`}
+                    className={
+                      selected.col ===
+                      index
+                        ? "selected-column"
+                        : ""
+                    }
+                  >
+                    <div className="column-header-content">
+
+                      <span>
+                        {columnLetter(
+                          index
+                        )}
+                      </span>
+
+                      <strong>
+                        {header}
+                      </strong>
+
+                    </div>
+                  </th>
                 )
-                .map(
-                  (header) => (
-                    <th
-                      key={header}
-                      title={header}
-                    >
-                      {header}
-                    </th>
-                  )
-                )}
+              )}
 
             </tr>
           </thead>
 
           <tbody>
 
-            {filteredRows.map(
-              (row, visibleRowIndex) => {
+            {sheet.rows.map(
+              (
+                row,
+                rowIndex
+              ) => {
 
-                const actualRowIndex =
-                  sheet.rows.indexOf(
+                const rowText =
+                  Object.values(
                     row
-                  );
+                  )
+                    .join(" ")
+                    .toLowerCase();
+
+                if (
+                  search &&
+                  !rowText.includes(
+                    search.toLowerCase()
+                  )
+                ) {
+                  return null;
+                }
 
                 return (
                   <tr
                     key={
-                      `${actualRowIndex}-${visibleRowIndex}`
+                      rowIndex
                     }
                   >
 
-                    <td className="row-number">
-                      {actualRowIndex +
+                    <td
+                      className={
+                        selected.row ===
+                        rowIndex
+                          ? "row-number selected-row"
+                          : "row-number"
+                      }
+                    >
+                      {rowIndex +
                         2}
                     </td>
 
-                    {sheet.headers
-                      .filter(
-                        (header) =>
-                          !hiddenColumns.includes(
+                    {visibleHeaders.map(
+                      ({
+                        header,
+                        index,
+                      }) => {
+
+                        const value =
+                          row[
                             header
-                          )
-                      )
-                      .map(
-                        (header) => (
+                          ] ?? "";
+
+                        const isSelected =
+                          selected.row ===
+                            rowIndex &&
+                          selected.col ===
+                            index;
+
+                        const isFormula =
+                          typeof value ===
+                            "string" &&
+                          value.startsWith(
+                            "="
+                          );
+
+                        return (
                           <td
-                            key={header}
-                          >
-                            <input
-                              className="cell-input"
-                              value={
-                                row[
-                                  header
-                                ] ?? ""
-                              }
-                              onChange={(
-                                e
-                              ) =>
-                                updateCell(
-                                  visibleRowIndex,
-                                  header,
-                                  e.target.value
+                            key={`${rowIndex}-${index}`}
+                            className={[
+                              isSelected
+                                ? "cell selected-cell"
+                                : "cell",
+                              isFormula
+                                ? "formula-cell"
+                                : "",
+                            ].join(
+                              " "
+                            )}
+                            onClick={() =>
+                              selectCell(
+                                rowIndex,
+                                index
+                              )
+                            }
+                            onDoubleClick={() => {
+                              selectCell(
+                                rowIndex,
+                                index
+                              );
+
+                              setEditValue(
+                                String(
+                                  value
                                 )
-                              }
-                            />
+                              );
+
+                              setEditing(
+                                true
+                              );
+                            }}
+                          >
+
+                            {isSelected &&
+                            editing ? (
+                              <input
+                                autoFocus
+                                className="cell-editor"
+                                value={
+                                  editValue
+                                }
+                                onChange={(
+                                  e
+                                ) =>
+                                  setEditValue(
+                                    e.target.value
+                                  )
+                                }
+                                onBlur={
+                                  commitEdit
+                                }
+                                onKeyDown={(
+                                  e
+                                ) => {
+
+                                  if (
+                                    e.key ===
+                                    "Enter"
+                                  ) {
+                                    commitEdit();
+                                  }
+
+                                  if (
+                                    e.key ===
+                                    "Escape"
+                                  ) {
+                                    setEditing(
+                                      false
+                                    );
+                                  }
+
+                                }}
+                              />
+                            ) : (
+                              <span>
+                                {String(
+                                  value
+                                )}
+                              </span>
+                            )}
+
                           </td>
-                        )
-                      )}
+                        );
+                      }
+                    )}
 
                   </tr>
                 );
@@ -993,44 +1330,131 @@ export default function DataEditorPage({
 
         </table>
 
-        {!filteredRows.length && (
-          <div className="editor-no-results">
-            No matching rows found.
-          </div>
-        )}
-
       </div>
 
-      {/* FOOTER */}
+      {/* =====================================================
+          FOOTER
+      ===================================================== */}
 
-      <div className="data-editor-footer">
+      <footer className="editor-footer">
 
         <div>
+          Sheet:{" "}
           <strong>
             {sheet.name}
           </strong>
-
-          <span>
-            {" "}
-            · {sheet.rows.length} rows
-            {" "}
-            · {sheet.headers.length} columns
-          </span>
         </div>
 
         <div>
-          Showing{" "}
+          Selected:{" "}
           <strong>
-            {filteredRows.length}
-          </strong>{" "}
-          of{" "}
-          <strong>
-            {sheet.rows.length}
-          </strong>{" "}
-          rows
+            {selectedHeader ||
+              "—"}
+          </strong>
         </div>
 
-      </div>
+        <div className="editor-footer-status">
+
+          <span className="status-dot" />
+
+          Workbook ready
+
+        </div>
+
+      </footer>
+
+    </div>
+  );
+}
+
+/* =========================================================
+   COLUMN MENU
+========================================================= */
+
+function ColumnMenu({
+  headers,
+  hiddenColumns,
+  activeSheet,
+  onToggle,
+}) {
+  const [open, setOpen] =
+    useState(false);
+
+  return (
+    <div className="column-menu-wrapper">
+
+      <button
+        className="editor-secondary-btn"
+        onClick={() =>
+          setOpen(
+            (value) =>
+              !value
+          )
+        }
+      >
+        <EyeOff
+          size={15}
+        />
+
+        Columns
+
+        <ChevronDown
+          size={14}
+        />
+      </button>
+
+      {open && (
+        <div className="column-menu">
+
+          <div className="column-menu-title">
+            Show / Hide Columns
+          </div>
+
+          {headers.map(
+            (
+              header,
+              index
+            ) => {
+
+              const hidden =
+                hiddenColumns[
+                  `${activeSheet}-${index}`
+                ];
+
+              return (
+                <button
+                  key={`${header}-${index}`}
+                  onClick={() =>
+                    onToggle(
+                      index
+                    )
+                  }
+                >
+
+                  {hidden ? (
+                    <EyeOff
+                      size={14}
+                    />
+                  ) : (
+                    <Eye
+                      size={14}
+                    />
+                  )}
+
+                  <span>
+                    {columnLetter(
+                      index
+                    )}{" "}
+                    — {header}
+                  </span>
+
+                </button>
+              );
+            }
+          )}
+
+        </div>
+      )}
 
     </div>
   );
