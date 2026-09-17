@@ -1,4 +1,9 @@
-import React, { useMemo, useState } from "react";
+import React, {
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+
 import {
   ArrowLeft,
   ChevronDown,
@@ -13,7 +18,9 @@ import {
   Redo2,
   X,
 } from "lucide-react";
+
 import * as XLSX from "xlsx";
+
 
 /* =========================================================
    COLUMN LETTER
@@ -25,23 +32,150 @@ function columnLetter(index) {
 
   while (n > 0) {
     const rem = (n - 1) % 26;
-    result = String.fromCharCode(65 + rem) + result;
+
+    result =
+      String.fromCharCode(65 + rem) +
+      result;
+
     n = Math.floor((n - 1) / 26);
   }
 
   return result;
 }
 
+
 /* =========================================================
-   NORMALIZE ONE WORKBOOK OBJECT
+   READ AN ACTUAL EXCEL FILE
 ========================================================= */
 
-function normalizeSingleWorkbook(raw, fileIndex = 0) {
-  if (!raw) return [];
+async function readExcelFile(file, fileIndex) {
+  if (
+    !file ||
+    typeof file.arrayBuffer !== "function"
+  ) {
+    throw new Error(
+      `Uploaded item ${
+        fileIndex + 1
+      } is not a readable Excel file object.`
+    );
+  }
+
+  const buffer =
+    await file.arrayBuffer();
+
+  const workbook =
+    XLSX.read(buffer, {
+      type: "array",
+      cellFormula: true,
+      cellNF: true,
+      cellStyles: true,
+      cellDates: true,
+    });
+
+  const sheets = [];
+
+  workbook.SheetNames.forEach(
+    (sheetName) => {
+      const ws =
+        workbook.Sheets[
+          sheetName
+        ];
+
+      const range =
+        XLSX.utils.decode_range(
+          ws["!ref"] || "A1"
+        );
+
+      const headers = [];
+
+      for (
+        let c = range.s.c;
+        c <= range.e.c;
+        c++
+      ) {
+        const address =
+          XLSX.utils.encode_cell({
+            r: range.s.r,
+            c,
+          });
+
+        const cell =
+          ws[address];
+
+        headers.push(
+          cell?.v ??
+            `Column ${c + 1}`
+        );
+      }
+
+      const rows = [];
+
+      for (
+        let r =
+          range.s.r + 1;
+        r <= range.e.r;
+        r++
+      ) {
+        const row = {};
+
+        for (
+          let c = range.s.c;
+          c <= range.e.c;
+          c++
+        ) {
+          const address =
+            XLSX.utils.encode_cell({
+              r,
+              c,
+            });
+
+          const cell =
+            ws[address];
+
+          const header =
+            headers[
+              c - range.s.c
+            ];
+
+          if (cell?.f) {
+            row[header] =
+              `=${cell.f}`;
+          } else {
+            row[header] =
+              cell?.v ?? "";
+          }
+        }
+
+        rows.push(row);
+      }
+
+      sheets.push({
+        name: sheetName,
+        headers,
+        rows,
+        fileIndex,
+      });
+    }
+  );
+
+  return sheets;
+}
+
+
+/* =========================================================
+   READ PARSED WORKBOOK OBJECT
+========================================================= */
+
+function readParsedWorkbook(
+  workbook,
+  fileIndex
+) {
+  if (!workbook) {
+    return [];
+  }
 
   /*
-     CASE 1:
-     Parsed workbook object:
+     Structure:
 
      {
        fileName,
@@ -51,43 +185,69 @@ function normalizeSingleWorkbook(raw, fileIndex = 0) {
            headers,
            rows
          }
-       ],
+       ]
+     }
+  */
+
+  if (
+    Array.isArray(
+      workbook.workbookSheets
+    )
+  ) {
+    return workbook.workbookSheets.map(
+      (sheet) => ({
+        name: sheet.name,
+
+        headers:
+          sheet.headers ||
+          (
+            sheet.rows?.length
+              ? Object.keys(
+                  sheet.rows[0]
+                )
+              : []
+          ),
+
+        rows:
+          sheet.rows || [],
+
+        fileIndex,
+      })
+    );
+  }
+
+  /*
+     Structure:
+
+     {
        sheets: {
-         Sheet1: [...]
+         Sheet1: [],
+         Sheet2: []
        }
      }
   */
 
-  if (Array.isArray(raw.workbookSheets)) {
-    return raw.workbookSheets.map((sheet) => ({
-      name: sheet.name,
-      headers:
-        sheet.headers ||
-        (sheet.rows?.length
-          ? Object.keys(sheet.rows[0])
-          : []),
-      rows: sheet.rows || [],
-      fileIndex,
-    }));
-  }
-
-  /*
-     CASE 2:
-     Parsed workbook using sheets object
-  */
-
   if (
-    raw.sheets &&
-    typeof raw.sheets === "object"
+    workbook.sheets &&
+    typeof workbook.sheets ===
+      "object"
   ) {
-    return Object.entries(raw.sheets).map(
+    return Object.entries(
+      workbook.sheets
+    ).map(
       ([name, rows]) => ({
         name,
+
         headers:
           rows?.length
-            ? Object.keys(rows[0])
+            ? Object.keys(
+                rows[0]
+              )
             : [],
-        rows: rows || [],
+
+        rows:
+          rows || [],
+
         fileIndex,
       })
     );
@@ -96,343 +256,236 @@ function normalizeSingleWorkbook(raw, fileIndex = 0) {
   return [];
 }
 
+
 /* =========================================================
-   NORMALIZE RAW INPUT
+   LOAD ANY RAW INPUT
 
-   Supports:
+   Supports BOTH:
 
-   1. Array of parsed workbook objects
-   2. Single parsed workbook object
-   3. Array of actual File objects
+   1. File[]
+   2. Parsed workbook objects[]
 
 ========================================================= */
 
-async function normalizeRaw(raw) {
-  /*
-     IMPORTANT:
-
-     Your current UploadPage passes parsed workbook
-     objects, NOT browser File objects.
-
-     Therefore this function first handles those objects.
-  */
-
-  if (Array.isArray(raw)) {
-    const allSheets = [];
-
-    for (
-      let fileIndex = 0;
-      fileIndex < raw.length;
-      fileIndex++
-    ) {
-      const item = raw[fileIndex];
-
-      /*
-         Already parsed workbook
-      */
-      if (
-        item?.workbookSheets ||
-        item?.sheets
-      ) {
-        const sheets =
-          normalizeSingleWorkbook(
-            item,
-            fileIndex
-          );
-
-        allSheets.push(...sheets);
-        continue;
-      }
-
-      /*
-         Actual browser File object
-      */
-      if (
-        item &&
-        typeof item.arrayBuffer === "function"
-      ) {
-        const buffer =
-          await item.arrayBuffer();
-
-        const workbook = XLSX.read(
-          buffer,
-          {
-            type: "array",
-            cellFormula: true,
-            cellNF: true,
-            cellStyles: true,
-            cellDates: true,
-          }
-        );
-
-        workbook.SheetNames.forEach(
-          (sheetName) => {
-            const ws =
-              workbook.Sheets[sheetName];
-
-            const range =
-              XLSX.utils.decode_range(
-                ws["!ref"] || "A1"
-              );
-
-            const headers = [];
-
-            for (
-              let c = range.s.c;
-              c <= range.e.c;
-              c++
-            ) {
-              const address =
-                XLSX.utils.encode_cell({
-                  r: range.s.r,
-                  c,
-                });
-
-              const cell =
-                ws[address];
-
-              headers.push(
-                cell?.v ??
-                  `Column ${c + 1}`
-              );
-            }
-
-            const rows = [];
-
-            for (
-              let r =
-                range.s.r + 1;
-              r <= range.e.r;
-              r++
-            ) {
-              const row = {};
-
-              for (
-                let c = range.s.c;
-                c <= range.e.c;
-                c++
-              ) {
-                const address =
-                  XLSX.utils.encode_cell({
-                    r,
-                    c,
-                  });
-
-                const cell =
-                  ws[address];
-
-                const header =
-                  headers[
-                    c - range.s.c
-                  ];
-
-                if (cell?.f) {
-                  row[header] =
-                    `=${cell.f}`;
-                } else {
-                  row[header] =
-                    cell?.v ?? "";
-                }
-              }
-
-              rows.push(row);
-            }
-
-            allSheets.push({
-              name: sheetName,
-              headers,
-              rows,
-              fileIndex,
-            });
-          }
-        );
-      }
-    }
-
-    return allSheets;
+async function loadRawFiles(raw) {
+  if (!raw) {
+    return [];
   }
 
-  /*
-     Single parsed workbook
-  */
+  const items =
+    Array.isArray(raw)
+      ? raw
+      : [raw];
 
-  if (
-    raw?.workbookSheets ||
-    raw?.sheets
+  const allSheets = [];
+
+  for (
+    let fileIndex = 0;
+    fileIndex < items.length;
+    fileIndex++
   ) {
-    return normalizeSingleWorkbook(
-      raw,
-      0
+    const item =
+      items[fileIndex];
+
+    /*
+       ACTUAL EXCEL FILE
+    */
+
+    if (
+      item &&
+      typeof item.arrayBuffer ===
+        "function"
+    ) {
+      const sheets =
+        await readExcelFile(
+          item,
+          fileIndex
+        );
+
+      allSheets.push(
+        ...sheets
+      );
+
+      continue;
+    }
+
+    /*
+       ALREADY PARSED WORKBOOK
+    */
+
+    const sheets =
+      readParsedWorkbook(
+        item,
+        fileIndex
+      );
+
+    allSheets.push(
+      ...sheets
     );
   }
 
-  return [];
+  return allSheets;
 }
 
+
 /* =========================================================
-   BUILD EDITED PARSED WORKBOOKS
-
-   This is the critical part.
-
-   We return the SAME structure that your existing
-   Dashboard / calculations already expect.
-
+   CONVERT EDITOR DATA BACK TO PARSED WORKBOOKS
 ========================================================= */
 
 function buildEditedRaw(
-  originalRaw,
-  editorData
+  raw,
+  data
 ) {
-  /*
-     If the application stores multiple uploaded
-     workbook objects, preserve that structure.
-  */
+  const original =
+    Array.isArray(raw)
+      ? raw
+      : [raw];
 
-  if (Array.isArray(originalRaw)) {
-    return originalRaw.map(
-      (originalWorkbook, fileIndex) => {
-        const fileSheets =
-          editorData.filter(
-            (sheet) =>
-              sheet.fileIndex ===
-              fileIndex
-          );
+  return original.map(
+    (
+      originalWorkbook,
+      fileIndex
+    ) => {
+      const fileSheets =
+        data.filter(
+          (sheet) =>
+            sheet.fileIndex ===
+            fileIndex
+        );
 
-        const workbookSheets =
-          fileSheets.map((sheet) => ({
-            name: sheet.name,
-            headers: sheet.headers,
-            rows: sheet.rows,
-          }));
+      const workbookSheets =
+        fileSheets.map(
+          (sheet) => ({
+            name:
+              sheet.name,
 
-        return {
-          ...originalWorkbook,
-          workbookSheets,
-          sheets:
-            Object.fromEntries(
-              workbookSheets.map(
-                (sheet) => [
-                  sheet.name,
-                  sheet.rows,
-                ]
-              )
-            ),
-        };
-      }
-    );
-  }
+            headers:
+              sheet.headers,
 
-  /*
-     Single workbook object
-  */
+            rows:
+              sheet.rows,
+          })
+        );
 
-  const workbookSheets =
-    editorData.map((sheet) => ({
-      name: sheet.name,
-      headers: sheet.headers,
-      rows: sheet.rows,
-    }));
+      return {
+        ...originalWorkbook,
 
-  return {
-    ...originalRaw,
-    workbookSheets,
-    sheets:
-      Object.fromEntries(
-        workbookSheets.map(
-          (sheet) => [
-            sheet.name,
-            sheet.rows,
-          ]
-        )
-      ),
-  };
+        workbookSheets,
+
+        sheets:
+          Object.fromEntries(
+            workbookSheets.map(
+              (sheet) => [
+                sheet.name,
+                sheet.rows,
+              ]
+            )
+          ),
+      };
+    }
+  );
 }
 
+
 /* =========================================================
-   EXPORT EDITOR DATA TO XLSX
+   EXPORT
 ========================================================= */
 
-function downloadEditorData(
+function exportData(
   data,
-  fileName
+  raw
 ) {
-  /*
-     Group sheets by original file.
-  */
+  const groups = {};
 
-  const grouped = {};
+  data.forEach(
+    (sheet) => {
+      const index =
+        sheet.fileIndex || 0;
 
-  data.forEach((sheet) => {
-    const index =
-      sheet.fileIndex ?? 0;
+      if (!groups[index]) {
+        groups[index] = [];
+      }
 
-    if (!grouped[index]) {
-      grouped[index] = [];
+      groups[index].push(
+        sheet
+      );
     }
+  );
 
-    grouped[index].push(sheet);
-  });
-
-  Object.entries(grouped).forEach(
+  Object.entries(groups).forEach(
     ([fileIndex, sheets]) => {
       const workbook =
         XLSX.utils.book_new();
 
-      sheets.forEach((sheet) => {
-        const rows =
-          sheet.rows.map((row) => {
-            const ordered = {};
+      sheets.forEach(
+        (sheet) => {
+          const rows =
+            sheet.rows.map(
+              (row) => {
+                const ordered =
+                  {};
 
-            sheet.headers.forEach(
-              (header) => {
-                ordered[header] =
-                  row[header] ?? "";
+                sheet.headers.forEach(
+                  (header) => {
+                    ordered[
+                      header
+                    ] =
+                      row[
+                        header
+                      ] ?? "";
+                  }
+                );
+
+                return ordered;
               }
             );
 
-            return ordered;
-          });
+          const worksheet =
+            XLSX.utils.json_to_sheet(
+              rows,
+              {
+                header:
+                  sheet.headers,
+              }
+            );
 
-        const worksheet =
-          XLSX.utils.json_to_sheet(
-            rows,
-            {
-              header:
-                sheet.headers,
-            }
+          XLSX.utils.book_append_sheet(
+            workbook,
+            worksheet,
+            String(
+              sheet.name
+            ).slice(0, 31)
           );
+        }
+      );
 
-        XLSX.utils.book_append_sheet(
-          workbook,
-          worksheet,
+      let fileName =
+        `SLA_Edited_Workbook_${
+          Number(fileIndex) + 1
+        }.xlsx`;
+
+      if (
+        Array.isArray(raw) &&
+        raw[fileIndex]?.fileName
+      ) {
+        fileName =
           String(
-            sheet.name
-          ).slice(0, 31)
-        );
-      });
-
-      const baseName =
-        Array.isArray(fileName)
-          ? fileName[
-              Number(fileIndex)
-            ]
-          : fileName;
+            raw[fileIndex]
+              .fileName
+          ).replace(
+            /\.xlsx$/i,
+            "_Edited.xlsx"
+          );
+      }
 
       XLSX.writeFile(
         workbook,
-        baseName
-          ? String(baseName)
-              .replace(
-                /\.xlsx$/i,
-                ""
-              ) + ".xlsx"
-          : `SLA_Edited_Workbook_${
-              Number(fileIndex) + 1
-            }.xlsx`
+        fileName
       );
     }
   );
 }
+
 
 /* =========================================================
    MAIN COMPONENT
@@ -444,35 +497,19 @@ export default function DataEditorPage({
   onSave,
   onRecalculate,
 }) {
-  const initialSheets = useMemo(() => {
-    /*
-       Only synchronous normalization here.
-
-       Parsed workbook objects are what your current
-       application uses.
-    */
-
-    if (Array.isArray(raw)) {
-      return raw.flatMap(
-        (item, fileIndex) =>
-          normalizeSingleWorkbook(
-            item,
-            fileIndex
-          )
-      );
-    }
-
-    return normalizeSingleWorkbook(
-      raw,
-      0
-    );
-  }, [raw]);
-
   const [data, setData] =
-    useState(initialSheets);
+    useState([]);
 
-  const [activeSheet, setActiveSheet] =
-    useState(0);
+  const [loading, setLoading] =
+    useState(true);
+
+  const [error, setError] =
+    useState("");
+
+  const [
+    activeSheet,
+    setActiveSheet,
+  ] = useState(0);
 
   const [selected, setSelected] =
     useState({
@@ -483,14 +520,18 @@ export default function DataEditorPage({
   const [editing, setEditing] =
     useState(false);
 
-  const [editValue, setEditValue] =
-    useState("");
+  const [
+    editValue,
+    setEditValue,
+  ] = useState("");
 
   const [search, setSearch] =
     useState("");
 
-  const [hiddenColumns, setHiddenColumns] =
-    useState({});
+  const [
+    hiddenColumns,
+    setHiddenColumns,
+  ] = useState({});
 
   const [history, setHistory] =
     useState([]);
@@ -498,20 +539,88 @@ export default function DataEditorPage({
   const [future, setFuture] =
     useState([]);
 
+  /* =======================================================
+     LOAD DATA
+  ======================================================= */
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      try {
+        setLoading(true);
+        setError("");
+
+        const sheets =
+          await loadRawFiles(
+            raw
+          );
+
+        if (cancelled) {
+          return;
+        }
+
+        setData(sheets);
+        setActiveSheet(0);
+
+        setSelected({
+          row: 0,
+          col: 0,
+        });
+
+        setHistory([]);
+        setFuture([]);
+      } catch (err) {
+        if (!cancelled) {
+          console.error(
+            "DataEditor load error:",
+            err
+          );
+
+          setError(
+            err?.message ||
+              "Unable to load workbook."
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    }
+
+    load();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [raw]);
+
+
+  /* =======================================================
+     CURRENT SHEET
+  ======================================================= */
+
   const sheet =
     data[activeSheet];
 
+
   /* =======================================================
-     VISIBLE HEADERS
+     VISIBLE COLUMNS
   ======================================================= */
 
   const visibleHeaders =
     useMemo(() => {
-      if (!sheet) return [];
+      if (!sheet) {
+        return [];
+      }
 
       return sheet.headers
         .map(
-          (header, index) => ({
+          (
+            header,
+            index
+          ) => ({
             header,
             index,
           })
@@ -528,6 +637,7 @@ export default function DataEditorPage({
       activeSheet,
     ]);
 
+
   /* =======================================================
      SELECTED CELL
   ======================================================= */
@@ -540,22 +650,9 @@ export default function DataEditorPage({
   const selectedValue =
     sheet?.rows?.[
       selected.row
-    ]?.[selectedHeader] ?? "";
+    ]?.[selectedHeader] ??
+    "";
 
-  /* =======================================================
-     HISTORY
-  ======================================================= */
-
-  function pushHistory(nextData) {
-    setHistory((prev) => [
-      ...prev.slice(-30),
-      data,
-    ]);
-
-    setFuture([]);
-
-    setData(nextData);
-  }
 
   /* =======================================================
      UPDATE CELL
@@ -566,45 +663,73 @@ export default function DataEditorPage({
     colIndex,
     value
   ) {
-    if (!sheet) return;
+    if (!sheet) {
+      return;
+    }
 
     const header =
-      sheet.headers[colIndex];
+      sheet.headers[
+        colIndex
+      ];
+
+    const previous =
+      data;
 
     const next =
       data.map(
-        (currentSheet, sheetIndex) => {
+        (
+          current,
+          sheetIndex
+        ) => {
           if (
             sheetIndex !==
             activeSheet
           ) {
-            return currentSheet;
+            return current;
           }
 
           return {
-            ...currentSheet,
+            ...current,
 
             rows:
-              currentSheet.rows.map(
-                (row, rowIndex2) =>
-                  rowIndex2 ===
-                  rowIndex
-                    ? {
-                        ...row,
-                        [header]:
-                          value,
-                      }
-                    : row
+              current.rows.map(
+                (
+                  row,
+                  index
+                ) => {
+                  if (
+                    index !==
+                    rowIndex
+                  ) {
+                    return row;
+                  }
+
+                  return {
+                    ...row,
+                    [header]:
+                      value,
+                  };
+                }
               ),
           };
         }
       );
 
-    pushHistory(next);
+    setHistory(
+      (prev) => [
+        ...prev.slice(-30),
+        previous,
+      ]
+    );
+
+    setFuture([]);
+
+    setData(next);
   }
 
+
   /* =======================================================
-     COMMIT EDIT
+     COMMIT
   ======================================================= */
 
   function commitEdit() {
@@ -617,8 +742,9 @@ export default function DataEditorPage({
     setEditing(false);
   }
 
+
   /* =======================================================
-     SELECT CELL
+     SELECT
   ======================================================= */
 
   function selectCell(
@@ -633,56 +759,75 @@ export default function DataEditorPage({
     setEditing(false);
   }
 
+
   /* =======================================================
      UNDO
   ======================================================= */
 
   function undo() {
-    if (!history.length) return;
+    if (!history.length) {
+      return;
+    }
 
     const previous =
       history[
         history.length - 1
       ];
 
-    setFuture((prev) => [
-      ...prev,
-      data,
-    ]);
+    setFuture(
+      (prev) => [
+        ...prev,
+        data,
+      ]
+    );
 
     setData(previous);
 
-    setHistory((prev) =>
-      prev.slice(0, -1)
+    setHistory(
+      (prev) =>
+        prev.slice(
+          0,
+          -1
+        )
     );
   }
+
 
   /* =======================================================
      REDO
   ======================================================= */
 
   function redo() {
-    if (!future.length) return;
+    if (!future.length) {
+      return;
+    }
 
     const next =
       future[
         future.length - 1
       ];
 
-    setHistory((prev) => [
-      ...prev,
-      data,
-    ]);
+    setHistory(
+      (prev) => [
+        ...prev,
+        data,
+      ]
+    );
 
     setData(next);
 
-    setFuture((prev) =>
-      prev.slice(0, -1)
+    setFuture(
+      (prev) =>
+        prev.slice(
+          0,
+          -1
+        )
     );
   }
 
+
   /* =======================================================
-     TOGGLE COLUMN
+     HIDE / SHOW COLUMN
   ======================================================= */
 
   function toggleColumn(
@@ -694,37 +839,16 @@ export default function DataEditorPage({
     setHiddenColumns(
       (prev) => ({
         ...prev,
+
         [key]:
           !prev[key],
       })
     );
   }
 
-  /* =======================================================
-     EXPORT
-  ======================================================= */
-
-  function exportWorkbook() {
-    const fileNames =
-      Array.isArray(raw)
-        ? raw.map(
-            (item, index) =>
-              item?.fileName ||
-              `SLA_Edited_Workbook_${
-                index + 1
-              }`
-          )
-        : raw?.fileName ||
-          "SLA_Edited_Workbook";
-
-    downloadEditorData(
-      data,
-      fileNames
-    );
-  }
 
   /* =======================================================
-     SAVE CHANGES
+     SAVE
   ======================================================= */
 
   function saveChanges() {
@@ -745,8 +869,9 @@ export default function DataEditorPage({
     );
   }
 
+
   /* =======================================================
-     RECALCULATE DASHBOARD
+     RECALCULATE
   ======================================================= */
 
   function recalculate() {
@@ -771,14 +896,99 @@ export default function DataEditorPage({
     );
   }
 
+
   /* =======================================================
-     EMPTY STATE
+     EXPORT
+  ======================================================= */
+
+  function exportWorkbook() {
+    exportData(
+      data,
+      raw
+    );
+  }
+
+
+  /* =======================================================
+     LOADING SCREEN
+  ======================================================= */
+
+  if (loading) {
+    return (
+      <div className="data-editor-page">
+
+        <div className="data-editor-empty">
+
+          <RefreshCcw
+            size={44}
+            className="spin"
+          />
+
+          <h2>
+            Loading workbook...
+          </h2>
+
+          <p>
+            Reading the uploaded
+            workbook data.
+          </p>
+
+        </div>
+
+      </div>
+    );
+  }
+
+
+  /* =======================================================
+     ERROR SCREEN
+  ======================================================= */
+
+  if (error) {
+    return (
+      <div className="data-editor-page">
+
+        <div className="data-editor-empty">
+
+          <FileSpreadsheet
+            size={44}
+          />
+
+          <h2>
+            Unable to load workbook
+          </h2>
+
+          <p>
+            {error}
+          </p>
+
+          <button
+            onClick={onBack}
+          >
+            <ArrowLeft
+              size={16}
+            />
+
+            Back to Dashboard
+          </button>
+
+        </div>
+
+      </div>
+    );
+  }
+
+
+  /* =======================================================
+     NO DATA
   ======================================================= */
 
   if (!sheet) {
     return (
       <div className="data-editor-page">
+
         <div className="data-editor-empty">
+
           <FileSpreadsheet
             size={44}
           />
@@ -788,29 +998,37 @@ export default function DataEditorPage({
           </h2>
 
           <p>
-            The uploaded workbook data
-            was not passed to the editor.
+            No readable sheets were
+            found in the uploaded
+            workbook.
           </p>
 
           <button
             onClick={onBack}
           >
+            <ArrowLeft
+              size={16}
+            />
+
             Back to Dashboard
           </button>
+
         </div>
+
       </div>
     );
   }
 
+
   /* =======================================================
-     MAIN EDITOR
+     EDITOR
   ======================================================= */
 
   return (
     <div className="data-editor-page">
 
       {/* =====================================================
-          TOP BAR
+          HEADER
       ===================================================== */}
 
       <header className="data-editor-topbar">
@@ -834,6 +1052,7 @@ export default function DataEditorPage({
           </div>
 
           <div>
+
             <div className="editor-title">
               Workbook Data Editor
             </div>
@@ -847,13 +1066,15 @@ export default function DataEditorPage({
                     )
                     .filter(Boolean)
                     .join(" · ") ||
-                  "Uploaded Workbooks"
+                  "Uploaded Workbook"
                 : raw?.fileName ||
                   "Uploaded Workbook"}
             </div>
+
           </div>
 
         </div>
+
 
         <div className="editor-actions">
 
@@ -870,6 +1091,7 @@ export default function DataEditorPage({
             />
           </button>
 
+
           <button
             className="editor-tool-btn"
             onClick={redo}
@@ -883,7 +1105,9 @@ export default function DataEditorPage({
             />
           </button>
 
+
           <div className="editor-divider" />
+
 
           <button
             className="editor-secondary-btn"
@@ -898,6 +1122,7 @@ export default function DataEditorPage({
             Recalculate Dashboard
           </button>
 
+
           <button
             className="editor-secondary-btn"
             onClick={
@@ -910,6 +1135,7 @@ export default function DataEditorPage({
 
             Export
           </button>
+
 
           <button
             className="editor-primary-btn"
@@ -925,7 +1151,9 @@ export default function DataEditorPage({
           </button>
 
         </div>
+
       </header>
+
 
       {/* =====================================================
           SHEET TABS
@@ -934,7 +1162,10 @@ export default function DataEditorPage({
       <div className="editor-sheet-tabs">
 
         {data.map(
-          (currentSheet, index) => (
+          (
+            currentSheet,
+            index
+          ) => (
             <button
               key={`${currentSheet.fileIndex}-${currentSheet.name}-${index}`}
               className={
@@ -944,6 +1175,7 @@ export default function DataEditorPage({
                   : "editor-sheet-tab"
               }
               onClick={() => {
+
                 setActiveSheet(
                   index
                 );
@@ -958,6 +1190,7 @@ export default function DataEditorPage({
                 );
 
                 setSearch("");
+
               }}
             >
               {currentSheet.name}
@@ -966,6 +1199,7 @@ export default function DataEditorPage({
         )}
 
       </div>
+
 
       {/* =====================================================
           TOOLBAR
@@ -1003,7 +1237,9 @@ export default function DataEditorPage({
 
         </div>
 
+
         <div className="editor-toolbar-spacer" />
+
 
         <div className="editor-sheet-info">
 
@@ -1020,6 +1256,7 @@ export default function DataEditorPage({
           </span>
 
         </div>
+
 
         <ColumnMenu
           headers={
@@ -1038,6 +1275,7 @@ export default function DataEditorPage({
 
       </div>
 
+
       {/* =====================================================
           FORMULA BAR
       ===================================================== */}
@@ -1051,9 +1289,11 @@ export default function DataEditorPage({
           {selected.row + 2}
         </div>
 
+
         <div className="formula-symbol">
           fx
         </div>
+
 
         <input
           className="formula-input"
@@ -1066,6 +1306,7 @@ export default function DataEditorPage({
                 )
           }
           onChange={(e) => {
+
             if (!editing) {
               setEditing(
                 true
@@ -1075,8 +1316,28 @@ export default function DataEditorPage({
             setEditValue(
               e.target.value
             );
+
+          }}
+          onFocus={() => {
+
+            if (!editing) {
+
+              setEditValue(
+                String(
+                  selectedValue ??
+                    ""
+                )
+              );
+
+              setEditing(
+                true
+              );
+
+            }
+
           }}
           onKeyDown={(e) => {
+
             if (
               e.key ===
               "Enter"
@@ -1092,28 +1353,17 @@ export default function DataEditorPage({
                 false
               );
             }
-          }}
-          onFocus={() => {
-            if (!editing) {
-              setEditValue(
-                String(
-                  selectedValue ??
-                    ""
-                )
-              );
 
-              setEditing(
-                true
-              );
-            }
           }}
         />
+
 
         <div className="formula-column-name">
           {selectedHeader}
         </div>
 
       </div>
+
 
       {/* =====================================================
           GRID
@@ -1124,6 +1374,7 @@ export default function DataEditorPage({
         <table className="editor-grid">
 
           <thead>
+
             <tr>
 
               <th className="row-number-header">
@@ -1135,6 +1386,7 @@ export default function DataEditorPage({
                   header,
                   index,
                 }) => (
+
                   <th
                     key={`${header}-${index}`}
                     className={
@@ -1144,6 +1396,7 @@ export default function DataEditorPage({
                         : ""
                     }
                   >
+
                     <div className="column-header-content">
 
                       <span>
@@ -1157,12 +1410,16 @@ export default function DataEditorPage({
                       </strong>
 
                     </div>
+
                   </th>
+
                 )
               )}
 
             </tr>
+
           </thead>
+
 
           <tbody>
 
@@ -1189,6 +1446,7 @@ export default function DataEditorPage({
                 }
 
                 return (
+
                   <tr
                     key={
                       rowIndex
@@ -1206,6 +1464,7 @@ export default function DataEditorPage({
                       {rowIndex +
                         2}
                     </td>
+
 
                     {visibleHeaders.map(
                       ({
@@ -1232,25 +1491,30 @@ export default function DataEditorPage({
                           );
 
                         return (
+
                           <td
                             key={`${rowIndex}-${index}`}
                             className={[
                               isSelected
                                 ? "cell selected-cell"
                                 : "cell",
+
                               isFormula
                                 ? "formula-cell"
                                 : "",
                             ].join(
                               " "
                             )}
+
                             onClick={() =>
                               selectCell(
                                 rowIndex,
                                 index
                               )
                             }
+
                             onDoubleClick={() => {
+
                               selectCell(
                                 rowIndex,
                                 index
@@ -1265,11 +1529,13 @@ export default function DataEditorPage({
                               setEditing(
                                 true
                               );
+
                             }}
                           >
 
                             {isSelected &&
                             editing ? (
+
                               <input
                                 autoFocus
                                 className="cell-editor"
@@ -1308,20 +1574,25 @@ export default function DataEditorPage({
 
                                 }}
                               />
+
                             ) : (
+
                               <span>
                                 {String(
                                   value
                                 )}
                               </span>
+
                             )}
 
                           </td>
+
                         );
                       }
                     )}
 
                   </tr>
+
                 );
               }
             )}
@@ -1331,6 +1602,7 @@ export default function DataEditorPage({
         </table>
 
       </div>
+
 
       {/* =====================================================
           FOOTER
@@ -1345,6 +1617,7 @@ export default function DataEditorPage({
           </strong>
         </div>
 
+
         <div>
           Selected:{" "}
           <strong>
@@ -1352,6 +1625,7 @@ export default function DataEditorPage({
               "—"}
           </strong>
         </div>
+
 
         <div className="editor-footer-status">
 
@@ -1366,6 +1640,7 @@ export default function DataEditorPage({
     </div>
   );
 }
+
 
 /* =========================================================
    COLUMN MENU
@@ -1403,12 +1678,15 @@ function ColumnMenu({
         />
       </button>
 
+
       {open && (
+
         <div className="column-menu">
 
           <div className="column-menu-title">
             Show / Hide Columns
           </div>
+
 
           {headers.map(
             (
@@ -1422,6 +1700,7 @@ function ColumnMenu({
                 ];
 
               return (
+
                 <button
                   key={`${header}-${index}`}
                   onClick={() =>
@@ -1449,11 +1728,13 @@ function ColumnMenu({
                   </span>
 
                 </button>
+
               );
             }
           )}
 
         </div>
+
       )}
 
     </div>
