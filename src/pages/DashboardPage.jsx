@@ -7,6 +7,7 @@ import {
   MapPin,
   Ruler,
   Clock3,
+  Pencil,
 } from "lucide-react";
 
 import {
@@ -20,7 +21,6 @@ import {
   LabelList,
 } from "recharts";
 
-
 /* =========================================================
    FORMATTERS
 ========================================================= */
@@ -29,7 +29,6 @@ const nf = new Intl.NumberFormat("en-IN");
 
 const pct = (value) =>
   `${Number(value || 0).toFixed(2)}%`;
-
 
 /* =========================================================
    KPI CARD
@@ -65,16 +64,14 @@ function Kpi({
   );
 }
 
-
 /* =========================================================
    STANDARD PERFORMANCE TABLE
 
    Used for:
-
-   SLA / Quantity
-   SLA / LR
-   State / Quantity
-   State / LR
+   - SLA / Quantity
+   - SLA / LR
+   - State / Quantity
+   - State / LR
 ========================================================= */
 
 function PerformanceTable({
@@ -84,13 +81,13 @@ function PerformanceTable({
   measureLabel,
 }) {
 
-  const outTotal = rows.reduce(
+  const outTotal = (rows || []).reduce(
     (sum, row) =>
       sum + Number(row.out || 0),
     0
   );
 
-  const withinTotal = rows.reduce(
+  const withinTotal = (rows || []).reduce(
     (sum, row) =>
       sum + Number(row.within || 0),
     0
@@ -127,7 +124,6 @@ function PerformanceTable({
 
       </div>
 
-
       <div className="table-wrap">
 
         <table>
@@ -159,7 +155,6 @@ function PerformanceTable({
             </tr>
 
           </thead>
-
 
           <tbody>
 
@@ -215,7 +210,6 @@ function PerformanceTable({
               )
             )}
 
-
             <tr className="total-row">
 
               <td>
@@ -250,29 +244,15 @@ function PerformanceTable({
   );
 }
 
-
 /* =========================================================
    TAT-WISE PERFORMANCE TABLE
 
-   IMPORTANT:
-
-   This intentionally has the SAME CARD STRUCTURE as
-   SLA / Quantity and SLA / LR.
-
-   Header:
-       SLA / Quantity       Invoice Qty
-
-   Columns:
-       CATEGORY
-       INVOICE QTY
-       DELIVERY TAT %
-
    Rows:
-       Out TAT
-       Within TAT
-       Grand Total
+   - Out TAT
+   - Within TAT
+   - Grand Total
 
-   There is NO extra Within TAT footer.
+   No TAT 1 / TAT 2.
 ========================================================= */
 
 function TatPerformanceTable({
@@ -301,14 +281,10 @@ function TatPerformanceTable({
       ? (within / total) * 100
       : 0;
 
-
   return (
     <section className="panel">
 
-
-      {/* ===================================================
-          CARD HEADER
-      =================================================== */}
+      {/* CARD HEADER */}
 
       <div className="panel-head">
 
@@ -324,17 +300,13 @@ function TatPerformanceTable({
 
         </div>
 
-
         <span className="measure-badge">
           {measureLabel}
         </span>
 
       </div>
 
-
-      {/* ===================================================
-          TABLE
-      =================================================== */}
+      {/* TABLE */}
 
       <div className="table-wrap">
 
@@ -360,13 +332,9 @@ function TatPerformanceTable({
 
           </thead>
 
-
           <tbody>
 
-
-            {/* ---------------------------------------------
-                OUT TAT
-            --------------------------------------------- */}
+            {/* OUT TAT */}
 
             <tr>
 
@@ -390,10 +358,7 @@ function TatPerformanceTable({
 
             </tr>
 
-
-            {/* ---------------------------------------------
-                WITHIN TAT
-            --------------------------------------------- */}
+            {/* WITHIN TAT */}
 
             <tr>
 
@@ -417,10 +382,7 @@ function TatPerformanceTable({
 
             </tr>
 
-
-            {/* ---------------------------------------------
-                GRAND TOTAL
-            --------------------------------------------- */}
+            {/* GRAND TOTAL */}
 
             <tr className="total-row">
 
@@ -448,15 +410,14 @@ function TatPerformanceTable({
   );
 }
 
-
 /* =========================================================
    MAIN DASHBOARD
 ========================================================= */
 
 export default function DashboardPage({
   model,
+  onEditData,
 }) {
-
 
   /* =======================================================
      EMPTY STATE
@@ -465,7 +426,6 @@ export default function DashboardPage({
   if (!model) {
     return null;
   }
-
 
   /* =======================================================
      ERROR
@@ -480,7 +440,6 @@ export default function DashboardPage({
     );
 
   }
-
 
   /* =======================================================
      MODEL DATA
@@ -497,7 +456,6 @@ export default function DashboardPage({
     sourceInfo,
   } = model;
 
-
   /* =======================================================
      OVERALL TAT VALUES
 
@@ -508,7 +466,7 @@ export default function DashboardPage({
      LR:
        LR sheet
        → Unique LR No.
-======================================================= */
+  ======================================================= */
 
   const outQty =
     Number(qty?.out || 0);
@@ -522,10 +480,9 @@ export default function DashboardPage({
   const withinLR =
     Number(lr?.within || 0);
 
-
   /* =======================================================
      SLA GRAPH DATA
-======================================================= */
+  ======================================================= */
 
   const chartData =
     (slaQty || []).map(
@@ -563,15 +520,13 @@ export default function DashboardPage({
       })
     );
 
-
   /* =======================================================
      DASHBOARD
-======================================================= */
+  ======================================================= */
 
   return (
 
     <main className="dashboard">
-
 
       {/* ===================================================
           DASHBOARD HERO
@@ -616,8 +571,22 @@ export default function DashboardPage({
 
           </div>
 
-        </div>
+          {/* =================================================
+              EDIT DATA BUTTON
+          ================================================= */}
 
+          {onEditData && (
+            <button
+              type="button"
+              className="dashboard-edit-data-btn"
+              onClick={onEditData}
+            >
+              <Pencil size={15} />
+              Edit Data
+            </button>
+          )}
+
+        </div>
 
         {/* SOURCE INFORMATION */}
 
@@ -626,7 +595,6 @@ export default function DashboardPage({
           <div className="context-label">
             DATA SOURCES
           </div>
-
 
           <div className="source-tags">
 
@@ -645,7 +613,6 @@ export default function DashboardPage({
 
           </div>
 
-
           <div className="context-small">
             Runtime calculations · Format 1
           </div>
@@ -654,14 +621,11 @@ export default function DashboardPage({
 
       </div>
 
-
-
       {/* ===================================================
           KPI CARDS
       =================================================== */}
 
       <div className="kpi-grid">
-
 
         <Kpi
           label="Invoice Quantity"
@@ -675,7 +639,6 @@ export default function DashboardPage({
           accent="blue"
         />
 
-
         <Kpi
           label="Within TAT Qty"
           value={nf.format(
@@ -688,7 +651,6 @@ export default function DashboardPage({
           accent="green"
         />
 
-
         <Kpi
           label="Out TAT Qty"
           value={nf.format(
@@ -700,7 +662,6 @@ export default function DashboardPage({
           icon={Clock3}
           accent="orange"
         />
-
 
         <Kpi
           label="Unique LR Count"
@@ -716,14 +677,11 @@ export default function DashboardPage({
 
       </div>
 
-
-
       {/* ===================================================
           SLA PERFORMANCE GRAPH
       =================================================== */}
 
       <section className="panel chart-panel">
-
 
         <div className="panel-head">
 
@@ -739,13 +697,11 @@ export default function DashboardPage({
 
           </div>
 
-
           <span className="measure-badge">
             Invoice Qty
           </span>
 
         </div>
-
 
         <div className="chart-box">
 
@@ -765,12 +721,10 @@ export default function DashboardPage({
               barGap={5}
             >
 
-
               <CartesianGrid
                 strokeDasharray="3 3"
                 vertical={false}
               />
-
 
               <XAxis
                 dataKey="name"
@@ -779,20 +733,17 @@ export default function DashboardPage({
                 }}
               />
 
-
               <YAxis
                 tick={{
                   fontSize: 10,
                 }}
               />
 
-
               <Tooltip
                 formatter={(value) =>
                   nf.format(value)
                 }
               />
-
 
               {/* WITHIN TAT */}
 
@@ -821,7 +772,6 @@ export default function DashboardPage({
                 />
 
               </Bar>
-
 
               {/* OUT TAT */}
 
@@ -859,8 +809,6 @@ export default function DashboardPage({
 
       </section>
 
-
-
       {/* ===================================================
           01 — TAT-WISE PERFORMANCE
       =================================================== */}
@@ -871,13 +819,11 @@ export default function DashboardPage({
           01
         </span>
 
-
         <div>
 
           <h2>
             TAT-wise performance
           </h2>
-
 
           <p>
             Delivery TAT performance shown in
@@ -888,17 +834,13 @@ export default function DashboardPage({
 
       </div>
 
-
       {/* ===================================================
           TAT TABLES — SIDE BY SIDE
       =================================================== */}
 
       <div className="two-col">
 
-
-        {/* -------------------------------------------------
-            TAT / QUANTITY
-        ------------------------------------------------- */}
+        {/* TAT / QUANTITY */}
 
         <TatPerformanceTable
           title="SLA / Quantity"
@@ -907,10 +849,7 @@ export default function DashboardPage({
           withinValue={withinQty}
         />
 
-
-        {/* -------------------------------------------------
-            TAT / LR
-        ------------------------------------------------- */}
+        {/* TAT / LR */}
 
         <TatPerformanceTable
           title="SLA / LR"
@@ -920,8 +859,6 @@ export default function DashboardPage({
         />
 
       </div>
-
-
 
       {/* ===================================================
           02 — SLA-WISE PERFORMANCE
@@ -933,13 +870,11 @@ export default function DashboardPage({
           02
         </span>
 
-
         <div>
 
           <h2>
             SLA-wise performance
           </h2>
-
 
           <p>
             Delivery TAT split by distance
@@ -950,9 +885,7 @@ export default function DashboardPage({
 
       </div>
 
-
       <div className="two-col">
-
 
         {/* SLA / QUANTITY */}
 
@@ -962,7 +895,6 @@ export default function DashboardPage({
           rows={slaQty || []}
           measureLabel="Invoice Qty"
         />
-
 
         {/* SLA / LR */}
 
@@ -975,8 +907,6 @@ export default function DashboardPage({
 
       </div>
 
-
-
       {/* ===================================================
           03 — STATE-WISE PERFORMANCE
       =================================================== */}
@@ -987,13 +917,11 @@ export default function DashboardPage({
           03
         </span>
 
-
         <div>
 
           <h2>
             State-wise performance
           </h2>
-
 
           <p>
             Delivery TAT split using state
@@ -1004,9 +932,7 @@ export default function DashboardPage({
 
       </div>
 
-
       <div className="two-col">
-
 
         {/* STATE / QUANTITY */}
 
@@ -1016,7 +942,6 @@ export default function DashboardPage({
           rows={stateQty || []}
           measureLabel="Invoice Qty"
         />
-
 
         {/* STATE / LR */}
 
@@ -1028,8 +953,6 @@ export default function DashboardPage({
         />
 
       </div>
-
-
 
       {/* ===================================================
           FOOTER
@@ -1048,7 +971,6 @@ export default function DashboardPage({
 
         </div>
 
-
         <div>
 
           Source sheets:{" "}
@@ -1057,7 +979,6 @@ export default function DashboardPage({
         </div>
 
       </footer>
-
 
     </main>
   );
